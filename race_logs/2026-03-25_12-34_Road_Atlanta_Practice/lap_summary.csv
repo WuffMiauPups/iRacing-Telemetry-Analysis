@@ -1,5 +1,0 @@
-Lap,LapTime,Position,PositionChange,Incidents,FuelUsed,AvgSpeed_kmh,MaxSpeed_kmh,AvgThrottle,AvgBrake,GearShifts
-1,73.964,3,0,0,1.106,151.5,222.4,67.9,8.6,36
-2,,5,-2,6,0.033,163.1,241.7,71.2,6.3,44
-3,,5,0,0,1.169,197.3,242.1,86.6,2.9,25
-4,74.004,5,0,0,1.175,199.2,242.0,87.8,2.5,22
