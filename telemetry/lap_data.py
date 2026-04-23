@@ -12,12 +12,13 @@ from collections import defaultdict
 
 # Channels to plot (csv_column, display_name, unit, invert_y)
 CHANNELS = [
-    ('Speed_kmh',           'Speed',        'km/h',  False),
-    ('Throttle',            'Gas',          '%',     False),
-    ('Brake',               'Bremse',       '%',     False),
-    ('Gear',                'Gang',         '',      False),
-    ('SteeringWheelAngle',  'Lenkung',      'rad',   False),
-    ('LapDeltaToBestLap',   'Delta zu Best','s',     False),
+    ('Speed_kmh',           'Speed',         'km/h',  False),
+    ('Throttle',            'Gas',           '%',     False),
+    ('Brake',               'Bremse',        '%',     False),
+    ('Gear',                'Gang',          '',      False),
+    ('SteeringWheelAngle',  'Lenkung',       'rad',   False),
+    ('SteeringWheelTorque', 'Lenk-Torque',   'Nm',    False),
+    ('LapDeltaToBestLap',   'Delta zu Best', 's',     False),
 ]
 
 # Number of resampled points per lap (0-100% track position)
@@ -131,11 +132,11 @@ def load_with_metadata(csv_path):
                         val = val * 100.0
                 values[col] = val
 
-            # Extras needed by mini_sectors + variance + G-G scatter.
+            # Extras needed by mini_sectors + variance + G-G scatter that
+            # aren't in CHANNELS (SteeringWheelTorque is in CHANNELS now).
             values['LapCurrentLapTime'] = safe_float(row.get('LapCurrentLapTime'))
             values['LatAccel'] = safe_float(row.get('LatAccel'))
             values['LonAccel'] = safe_float(row.get('LonAccel'))
-            values['SteeringWheelTorque'] = safe_float(row.get('SteeringWheelTorque'))
 
             laps[lap].append((pct, values))
 
