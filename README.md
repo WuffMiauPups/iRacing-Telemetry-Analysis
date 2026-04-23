@@ -88,8 +88,7 @@ Three parallel detectors:
 - **Throttle** — falling-edge below 90 % (captures every lift, light and
   heavy).
 - **Steering** — rising-edge above 0.2 rad (~11°), direction-agnostic. This
-  is the one that maps to the track's total corner count (13-16 on
-  Hockenheim GP), including flat-out sweepers where you never touch the
+  is the one that maps to the track's total corner count, including flat-out sweepers where you never touch the
   brake.
 
 Events from all laps are clustered by track-position proximity
@@ -183,7 +182,7 @@ python main.py
 ```
 
 Terminal-only, no interactive analyze UI. Still auto-finalizes on
-disconnect. Ctrl+C also works.
+disconnect. Ctrl+C also works. *Real Application in the Making* 
 
 ### Re-analyze an older session
 
@@ -272,9 +271,7 @@ on session end (iRacing closes / worker.stop):
 
 ## Language
 
-GUI labels are in German ("Warte auf iRacing", "Theoretische Bestzeit",
-"Runden", etc.) because the author drives in German. The code and docs are
-in English. Open a PR if you want localized labels.
+German.
 
 ---
 
@@ -305,6 +302,7 @@ in English. Open a PR if you want localized labels.
 - Multi-driver comparison by loading two session folders side-by-side.
 - Fuel-strategy calculator with pit-window predictions.
 - Live car-status panel enhancements (G-force dot, throttle/brake bar).
+- And other stuff yet to Adjust/Implement
 
 ---
 
