@@ -18,7 +18,8 @@ import matplotlib.pyplot as plt
 
 BRAKE_THRESHOLD_PCT = 10.0       # Brake > 10% = "applied"
 THROTTLE_RELEASE_PCT = 90.0      # Throttle < 90% = "released"
-CLUSTER_EPSILON = 0.03           # 3% of lap distance ≈ same corner
+STEERING_THRESHOLD_RAD = 0.2     # |SteeringWheelAngle| > ~11° = turning in
+CLUSTER_EPSILON = 0.015          # 1.5% of lap distance ≈ same corner
 
 
 def detect_brake_points(lap_ticks, threshold=BRAKE_THRESHOLD_PCT):
@@ -32,6 +33,27 @@ def detect_brake_points(lap_ticks, threshold=BRAKE_THRESHOLD_PCT):
         if prev <= threshold < b:
             events.append(pct)
         prev = b
+    return events
+
+
+def detect_steering_events(lap_ticks, threshold=STEERING_THRESHOLD_RAD):
+    """Rising-edge pcts where |SteeringWheelAngle| crosses above threshold.
+
+    Direction-agnostic (abs) so left and right turn-ins are treated the same.
+    Default 0.2 rad (~11°) is big enough to ignore straight-line corrections
+    and catches the turn-in point of every real corner, including gentle
+    sweepers.
+    """
+    events = []
+    prev = 0.0
+    for pct, v in lap_ticks:
+        s = v.get('SteeringWheelAngle')
+        if s is None:
+            continue
+        s_abs = abs(s)
+        if prev <= threshold < s_abs:
+            events.append(pct)
+        prev = s_abs
     return events
 
 
@@ -98,30 +120,39 @@ def cluster_events_across_laps(events_per_lap, epsilon=CLUSTER_EPSILON):
     return result
 
 
-def build_variance_figure(brake_clusters, throttle_clusters, figure=None):
-    """Render brake/throttle variance chart onto a Figure (OO API, any backend).
+def build_variance_figure(brake_clusters, throttle_clusters,
+                            steering_clusters=None, figure=None):
+    """Render brake / throttle / steering variance charts onto a Figure
+    (OO API, any backend).
 
-    If `figure` is provided, draws into it (Qt embedding); otherwise makes a
-    new one (PNG export). Returns None if both cluster lists are empty.
+    If `figure` is provided, draws into it (Qt embedding); otherwise makes
+    a new one (PNG export). Returns None if all cluster lists are empty.
+
+    `steering_clusters` is optional for backward compat — older callers
+    that pre-date the corner-detection feature still work.
     """
     from matplotlib.figure import Figure
 
-    if not brake_clusters and not throttle_clusters:
+    steering_clusters = steering_clusters or []
+    if not brake_clusters and not throttle_clusters and not steering_clusters:
         return None
 
+    panels = [
+        (brake_clusters,    '#ff5555', 'Bremspunkt-Konsistenz (harte Bremszonen)'),
+        (throttle_clusters, '#55ff55', 'Throttle-Release Konsistenz (Lift-Punkte)'),
+        (steering_clusters, '#7fb8e8', 'Kurven-Einlenken Konsistenz (Turn-in Punkte)'),
+    ]
+
     if figure is None:
-        figure = Figure(figsize=(18, 8), facecolor='#1a1a2e')
+        figure = Figure(figsize=(18, 12), facecolor='#1a1a2e')
     else:
         figure.clear()
         figure.patch.set_facecolor('#1a1a2e')
 
-    ax_b = figure.add_subplot(2, 1, 1)
-    ax_t = figure.add_subplot(2, 1, 2)
+    n = len(panels)
+    axes = [figure.add_subplot(n, 1, i + 1) for i in range(n)]
 
-    for ax, clusters, color, title in (
-        (ax_b, brake_clusters, '#ff5555', 'Brake-Point Konsistenz (Runde zu Runde, nach Kurve)'),
-        (ax_t, throttle_clusters, '#55ff55', 'Throttle-Release Konsistenz (nach Kurve)'),
-    ):
+    for ax, (clusters, color, title) in zip(axes, panels):
         ax.set_facecolor('#16213e')
         ax.tick_params(colors='white', labelsize=9)
         ax.grid(True, alpha=0.15, color='white', axis='y')
@@ -163,10 +194,12 @@ def build_variance_figure(brake_clusters, throttle_clusters, figure=None):
     return figure
 
 
-def render_variance_plot(session_dir, brake_clusters, throttle_clusters):
+def render_variance_plot(session_dir, brake_clusters, throttle_clusters,
+                          steering_clusters=None):
     """Write brake_throttle_variance.png to disk. Thin wrapper over
     build_variance_figure."""
-    fig = build_variance_figure(brake_clusters, throttle_clusters)
+    fig = build_variance_figure(brake_clusters, throttle_clusters,
+                                  steering_clusters=steering_clusters)
     if fig is None:
         return None
     out_path = os.path.join(session_dir, 'brake_throttle_variance.png')

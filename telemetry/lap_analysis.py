@@ -280,17 +280,20 @@ def generate_lap_analysis(session_dir, include_all=False):
     except Exception as e:
         print(f"[lap_analysis] mini_sectors failed: {e}", file=sys.stderr)
 
-    # --- Brake/throttle variance analysis ---
+    # --- Brake / throttle / steering variance analysis ---
     try:
         from telemetry.variance_analysis import (
-            detect_brake_points, detect_throttle_releases,
+            detect_brake_points, detect_throttle_releases, detect_steering_events,
             cluster_events_across_laps, render_variance_plot,
         )
         brake_events = {ln: detect_brake_points(valid_laps[ln]) for ln in lap_nums}
         throttle_events = {ln: detect_throttle_releases(valid_laps[ln]) for ln in lap_nums}
+        steering_events = {ln: detect_steering_events(valid_laps[ln]) for ln in lap_nums}
         brake_clusters = cluster_events_across_laps(brake_events)
         throttle_clusters = cluster_events_across_laps(throttle_events)
-        render_variance_plot(session_dir, brake_clusters, throttle_clusters)
+        steering_clusters = cluster_events_across_laps(steering_events)
+        render_variance_plot(session_dir, brake_clusters, throttle_clusters,
+                              steering_clusters=steering_clusters)
     except Exception as e:
         print(f"[lap_analysis] variance_analysis failed: {e}", file=sys.stderr)
 

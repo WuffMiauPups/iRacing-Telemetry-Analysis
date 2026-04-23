@@ -26,7 +26,7 @@ from telemetry.mini_sectors import (
     compute_lap_sectors, compute_theoretical_best, build_sector_figure,
 )
 from telemetry.variance_analysis import (
-    detect_brake_points, detect_throttle_releases,
+    detect_brake_points, detect_throttle_releases, detect_steering_events,
     cluster_events_across_laps, build_variance_figure,
 )
 
@@ -262,12 +262,15 @@ class AnalyzeTab(QWidget):
                              tb_total, donors, figure=self.sector_fig)
         self.sector_canvas.draw_idle()
 
-        # Brake/throttle variance
+        # Brake / throttle / steering-based corner variance
         brake_events = {ln: detect_brake_points(kept[ln]) for ln in kept}
         throttle_events = {ln: detect_throttle_releases(kept[ln]) for ln in kept}
+        steering_events = {ln: detect_steering_events(kept[ln]) for ln in kept}
         brake_clusters = cluster_events_across_laps(brake_events)
         throttle_clusters = cluster_events_across_laps(throttle_events)
+        steering_clusters = cluster_events_across_laps(steering_events)
         built = build_variance_figure(brake_clusters, throttle_clusters,
+                                       steering_clusters=steering_clusters,
                                        figure=self.variance_fig)
         if built is None:
             self.variance_fig.clear()

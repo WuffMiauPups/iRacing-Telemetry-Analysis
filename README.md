@@ -31,7 +31,7 @@ analyze tab lets you browse every session you've ever logged.
 - **Session tree** — all your past sessions grouped by track, with lap-time labels.
 - **Lap overlay** — interactive matplotlib plot of Speed / Gas / Brake / Gear / Steering / Delta-to-Best across track position. Click a lap's legend entry to toggle it.
 - **Mini-sector heatmap** — 21 sectors × N laps, coloured by delta to sector-best. 3 main-sector dividers drawn. Title shows theoretical best time.
-- **Brake/throttle variance** — per-corner bar charts of where you start braking and when you lift, with standard deviation across laps. Tells you which corners you're inconsistent at.
+- **Brake / throttle / steering variance** — three per-corner bar charts: hard-braking zones (heavy brake application), throttle-release points (where you lift), and steering turn-in points (derived from `|SteeringWheelAngle| > 11°` — catches every corner, including flat-out sweepers where you don't brake). Each chart shows mean position + standard deviation + lap count across the session, so you can spot which corners you're inconsistent at.
 - **Lap-time progression** — scatter + line of lap number → lap time, with skipped laps (out/in/start/finish) marked with grey Xs, theoretical best as a dashed line.
 - **CSV export** — dump the 21 theoretical-best sectors + donor laps + delta to best actual lap as a CSV for external analysis.
 
@@ -67,12 +67,22 @@ sectors across all accepted laps.
   checkered flag. Green/checkered detected via `SessionFlags`.
 - **Practice / Qualifying**: just the first lap (flags unreliable).
 
-### Brake-point / throttle-release variance
+### Brake / throttle / steering variance
 
-Scans each lap for rising-edge brake applications (Brake > 10 %) and
-falling-edge throttle releases (Throttle < 90 %). Clusters events across laps
-by pct proximity (ε = 3 %) — each cluster ≈ one corner. Reports per-corner
-min / max / mean / std across laps.
+Three parallel detectors:
+
+- **Brake** — rising-edge above 10 % (hard braking only; Formula cars at
+  Hockenheim GP genuinely brake at ~5 zones, the rest are lift-only).
+- **Throttle** — falling-edge below 90 % (captures every lift, light and
+  heavy).
+- **Steering** — rising-edge above 0.2 rad (~11°), direction-agnostic. This
+  is the one that maps to the track's total corner count (13-16 on
+  Hockenheim GP), including flat-out sweepers where you never touch the
+  brake.
+
+Events from all laps are clustered by track-position proximity
+(ε = 1.5 % ≈ 68 m) — each cluster ≈ one corner. The chart reports per-corner
+min / max / mean / standard deviation across the laps in the session.
 
 ---
 
