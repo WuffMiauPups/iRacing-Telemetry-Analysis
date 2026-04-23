@@ -23,12 +23,18 @@ env/
 .idea/
 *.swp
 *.swo
+*~
+
+# OS
 .DS_Store
+Thumbs.db
+Desktop.ini
 
 # Build artifacts
 build/
 dist/
 *.egg-info/
+*.egg
 
 # Project-specific: live session output stays out of git
 race_logs/
@@ -45,3 +51,8 @@ alpaca-trading-bot/
 
 # Stray debug artifacts
 debug_telemetry.log
+*.log
+
+# NOTE: track_db/*.json IS tracked on purpose. The JSONs are small
+# per-track layouts; committing them means other users don't have to
+# drive a mapping lap on every circuit.
