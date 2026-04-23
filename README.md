@@ -14,6 +14,8 @@ shows the track, opponents, current-session sector deltas, car status, and
 your all-time personal best at the current track. The analyze tab lets you
 browse every session you've ever logged.
 
+![Live tab](docs/screenshots/live-tab.png)
+
 ---
 
 ## Features
@@ -36,6 +38,10 @@ browse every session you've ever logged.
 - **Brake / throttle / steering variance** — three per-corner bar charts: hard-braking zones (heavy brake application), throttle-release points (where you lift), and steering turn-in points (derived from `|SteeringWheelAngle| > 11°` — catches every corner, including flat-out sweepers where you don't brake). Each chart shows mean position + standard deviation + lap count across the session, so you can spot which corners you're inconsistent at.
 - **Lap-time progression** — scatter + line of lap number → lap time, with skipped laps (out/in/start/finish) marked with grey Xs, theoretical best as a dashed line.
 - **CSV export** — dump the 21 theoretical-best sectors + donor laps + delta to best actual lap as a CSV for external analysis.
+
+![Analyze tab — lap overlay](docs/screenshots/analyze-tab.png)
+![Mini-sector heatmap](docs/screenshots/mini-sectors.png)
+![Lap-time progression](docs/screenshots/lap-times.png)
 
 ### Data logging (always on)
 
