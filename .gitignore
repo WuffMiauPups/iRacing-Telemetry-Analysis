@@ -53,6 +53,9 @@ alpaca-trading-bot/
 debug_telemetry.log
 *.log
 
+# Local-only screenshots (not shipped with the repo)
+docs/screenshots/
+
 # NOTE: track_db/*.json IS tracked on purpose. The JSONs are small
 # per-track layouts; committing them means other users don't have to
 # drive a mapping lap on every circuit.

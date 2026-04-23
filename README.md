@@ -14,8 +14,6 @@ shows the track, opponents, current-session sector deltas, car status, and
 your all-time personal best at the current track. The analyze tab lets you
 browse every session you've ever logged.
 
-![Live tab placeholder — drop screenshot here](docs/screenshots/live-tab.png)
-
 ---
 
 ## Features
@@ -38,9 +36,6 @@ browse every session you've ever logged.
 - **Brake / throttle / steering variance** — three per-corner bar charts: hard-braking zones (heavy brake application), throttle-release points (where you lift), and steering turn-in points (derived from `|SteeringWheelAngle| > 11°` — catches every corner, including flat-out sweepers where you don't brake). Each chart shows mean position + standard deviation + lap count across the session, so you can spot which corners you're inconsistent at.
 - **Lap-time progression** — scatter + line of lap number → lap time, with skipped laps (out/in/start/finish) marked with grey Xs, theoretical best as a dashed line.
 - **CSV export** — dump the 21 theoretical-best sectors + donor laps + delta to best actual lap as a CSV for external analysis.
-
-![Analyze tab placeholder](docs/screenshots/analyze-tab.png)
-![Mini-sector heatmap placeholder](docs/screenshots/mini-sectors.png)
 
 ### Data logging (always on)
 
@@ -266,19 +261,6 @@ on session end (iRacing closes / worker.stop):
   └─► generate_lap_analysis     ──► lap_analysis.png, lap_delta_analysis.png,
                                      mini_sectors.png, brake_throttle_variance.png
 ```
-
----
-
-## Screenshots
-
-> Drop screenshots into `docs/screenshots/` with the filenames below and
-> they'll render here.
-
-- `docs/screenshots/live-tab.png` — Live tab with PB banner + sector delta
-- `docs/screenshots/analyze-tab.png` — Analyze tab with 4 sub-tabs
-- `docs/screenshots/mini-sectors.png` — Mini-sector heatmap
-- `docs/screenshots/variance.png` — Brake / throttle / steering variance
-- `docs/screenshots/lap-overlay.png` — Lap overlay with best lap highlighted
 
 ---
 
