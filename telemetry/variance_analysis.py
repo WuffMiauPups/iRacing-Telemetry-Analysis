@@ -16,7 +16,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 
-BRAKE_THRESHOLD_PCT = 10.0       # Brake > 10% = "applied"
+BRAKE_THRESHOLD_PCT = 3.0        # Brake > 3% = "applied" (catches trail/rotation brushes)
 THROTTLE_RELEASE_PCT = 90.0      # Throttle < 90% = "released"
 STEERING_THRESHOLD_RAD = 0.2     # |SteeringWheelAngle| > ~11° = turning in
 CLUSTER_EPSILON = 0.015          # 1.5% of lap distance ≈ same corner

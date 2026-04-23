@@ -82,8 +82,8 @@ sectors across all accepted laps.
 
 Three parallel detectors:
 
-- **Brake** — rising-edge above 10 % (hard braking only; Formula cars at
-  Hockenheim GP genuinely brake at ~5 zones, the rest are lift-only).
+- **Brake** — rising-edge above 3 % (low enough to catch trail-brake and
+  rotation brushes, not just heavy straight-line braking).
 - **Throttle** — falling-edge below 90 % (captures every lift, light and
   heavy).
 - **Steering** — rising-edge above 0.2 rad (~11°), direction-agnostic. This
