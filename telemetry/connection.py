@@ -2,6 +2,8 @@ import irsdk
 import time
 import struct
 
+import config
+
 
 class IRacingConnection:
     """Manages connection to iRacing via shared memory.
@@ -17,7 +19,12 @@ class IRacingConnection:
         self._weekend_info = None
         self._session_info = None
         self._last_reinit = 0
-        self._reinit_interval = 10  # Re-init every 10s to refresh mappings
+        self._reinit_interval = config.REINIT_INTERVAL_S
+        # Tick stagnation detection: if SessionTick stops advancing, treat
+        # as a hard disconnect even if pyirsdk still claims is_connected.
+        self._last_tick_value = None
+        self._last_tick_change_time = 0.0
+        self._tick_stagnation_s = config.TICK_STAGNATION_S
 
     def connect(self):
         """Connect to iRacing, blocks until iRacing is running."""
@@ -29,16 +36,56 @@ class IRacingConnection:
         self._cache_session_data()
 
     def check_connection(self):
-        """Check if still connected, reconnect if needed."""
-        if not self.ir.is_connected:
+        """Return True if connected, False otherwise. Non-blocking.
+
+        On hard disconnect (pyirsdk handle dead OR SessionTick stagnated),
+        attempts a single non-blocking `ir.startup()`. The caller is
+        responsible for deciding whether to keep polling or bail out —
+        this method never spins on a blocking reconnect loop.
+        """
+        # Hard disconnect via pyirsdk
+        hard_disconnect = not self.ir.is_connected
+
+        # Soft disconnect: SessionTick stopped advancing for too long.
+        # iRacing publishes a monotonically increasing tick. A stuck tick
+        # means the sim crashed/froze even if the shared mem handle is alive.
+        if not hard_disconnect:
+            tick = self.get('SessionTick')
+            now = time.time()
+            if tick is not None:
+                if tick != self._last_tick_value:
+                    self._last_tick_value = tick
+                    self._last_tick_change_time = now
+                elif self._last_tick_change_time and \
+                        (now - self._last_tick_change_time) > self._tick_stagnation_s:
+                    hard_disconnect = True
+            else:
+                # Tick unreadable -> behave like hard disconnect once enough
+                # time has passed since last successful read
+                if self._last_tick_change_time and \
+                        (now - self._last_tick_change_time) > self._tick_stagnation_s:
+                    hard_disconnect = True
+
+        if hard_disconnect:
+            self._reset_yaml_cache()
             self.connected = False
-            self._driver_info = None
-            self._weekend_info = None
-            self._session_info = None
-            self.ir.shutdown()
-            print("\nVerbindung verloren. Reconnecting...")
-            self.connect()
-            return
+            self._last_tick_value = None
+            self._last_tick_change_time = 0.0
+            try:
+                self.ir.shutdown()
+            except Exception:
+                pass
+            # Single non-blocking startup attempt. The worker loops back
+            # on False; no spinning-sleep-print loop here.
+            try:
+                if self.ir.startup():
+                    self.connected = True
+                    self._last_reinit = time.time()
+                    self._cache_session_data()
+                    return True
+            except Exception:
+                pass
+            return False
 
         # Periodically re-initialize to refresh shared memory mappings
         now = time.time()
@@ -47,17 +94,41 @@ class IRacingConnection:
             try:
                 self.ir.shutdown()
                 if not self.ir.startup():
+                    # Startup failed — next tick will retake the disconnect path.
                     self.connected = False
-                    return
+                    self._reset_yaml_cache()
+                    return False
                 self._cache_session_data()
             except Exception:
-                pass
+                # Any exception during re-init -> force full reconnect next tick.
+                self.connected = False
+                self._reset_yaml_cache()
+                return False
+
+        return True
+
+    def _reset_yaml_cache(self):
+        """Clear cached YAML so the next access re-fetches."""
+        self._driver_info = None
+        self._weekend_info = None
+        self._session_info = None
 
     def _cache_session_data(self):
-        """Cache session YAML data."""
+        """Cache session YAML data.
+
+        Each YAML field is fetched independently so a single bad/missing
+        section (e.g. SessionInfo not yet published) does not prevent the
+        others from being cached.
+        """
         try:
             self._driver_info = self.ir['DriverInfo']
+        except Exception:
+            pass
+        try:
             self._weekend_info = self.ir['WeekendInfo']
+        except Exception:
+            pass
+        try:
             self._session_info = self.ir['SessionInfo']
         except Exception:
             pass

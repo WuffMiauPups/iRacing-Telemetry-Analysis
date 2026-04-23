@@ -4,6 +4,18 @@ from rich.panel import Panel
 from rich.text import Text
 
 
+def _format_kpa(p):
+    if p is None:
+        return '--'
+    return f'{p:.0f} kPa'
+
+
+def _format_temp(t):
+    if t is None:
+        return '--'
+    return f'{t:.0f}C'
+
+
 def _format_laptime(seconds):
     """Format lap time from seconds to M:SS.mmm"""
     if seconds is None:
@@ -154,7 +166,51 @@ class Renderer:
 
         return Panel(text, title='WETTER & SESSION', border_style='bright_blue')
 
-    def render(self, timing_data=None, weather_data=None, session_info=None, map_status=None, **kwargs):
+    def build_pit_panel(self, pit_data):
+        """Build the pit/fuel panel. Returns None if data unusable."""
+        if pit_data is None:
+            return None
+        fuel = pit_data.get('fuel_level')
+        fpl = pit_data.get('fuel_per_lap')
+        laps_left = pit_data.get('laps_remaining')
+        source = pit_data.get('source')
+        if fuel is None and fpl is None:
+            return None
+
+        text = Text()
+        text.append(f'  Tank: {fuel:.2f} L\n' if fuel is not None else '  Tank: --\n')
+        text.append(f'  Verbrauch: {fpl:.2f} L/Runde\n' if fpl is not None else '  Verbrauch: --\n')
+        if laps_left is not None:
+            style = 'red bold' if laps_left < 3 else ('yellow' if laps_left < 6 else 'green')
+            text.append(f'  Reichweite: ~{laps_left:.1f} Runden\n', style=style)
+        else:
+            text.append('  Reichweite: --\n', style='dim')
+        if source:
+            text.append(f'  Quelle: {source}\n', style='dim')
+        return Panel(text, title='KRAFTSTOFF / PIT WINDOW', border_style='bright_blue')
+
+    def build_tire_panel(self, tire_data):
+        """Build the tyre panel as a 2x2 grid. Returns None if no data."""
+        if not tire_data:
+            return None
+        # Compact 2x2 layout matching real tyre positions (LF RF / LR RR)
+        grid = Table.grid(expand=True, padding=(0, 2))
+        grid.add_column(justify='center')
+        grid.add_column(justify='center')
+
+        def cell(label, corner):
+            t = Text()
+            t.append(f'{label}\n', style='bold')
+            t.append(f'{_format_kpa(corner.get("pressure_kpa"))}\n')
+            t.append(_format_temp(corner.get('temp_c')))
+            return t
+
+        grid.add_row(cell('LF', tire_data['lf']), cell('RF', tire_data['rf']))
+        grid.add_row(cell('LR', tire_data['lr']), cell('RR', tire_data['rr']))
+        return Panel(grid, title='REIFEN', border_style='bright_blue')
+
+    def render(self, timing_data=None, weather_data=None, session_info=None,
+               map_status=None, pit_data=None, tire_data=None, **kwargs):
         """Build complete display output."""
         panels = []
 
@@ -163,6 +219,16 @@ class Renderer:
 
         if weather_data is not None:
             panels.append(self.build_weather_panel(weather_data, session_info))
+
+        if pit_data is not None:
+            p = self.build_pit_panel(pit_data)
+            if p is not None:
+                panels.append(p)
+
+        if tire_data is not None:
+            p = self.build_tire_panel(tire_data)
+            if p is not None:
+                panels.append(p)
 
         if not panels:
             panels.append(Panel('Warte auf Daten...', border_style='dim'))

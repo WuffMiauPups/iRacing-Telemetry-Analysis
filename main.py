@@ -4,24 +4,47 @@ from datetime import datetime
 
 from rich.live import Live
 
+import config
 from telemetry.connection import IRacingConnection
 from telemetry.timing import TimingMonitor
 from telemetry.session import SessionMonitor
 from telemetry.track_map import TrackMapper
-from telemetry.track_db import get_track_key
+from telemetry.track_db import get_track_key, load_sector_splits
 from telemetry.data_logger import DataLogger
 from telemetry.session_summary import generate_session_summary
 from telemetry.lap_analysis import generate_lap_analysis
+from telemetry.pit_window import compute_pit_window
+from telemetry.tires import read_tires, has_any_data as tires_has_data
 from display.renderer import Renderer
 from display.map_window import MapWindow
 
 
-TICK_RATE = 0.1       # 10 Hz telemetry
-DISPLAY_RATE = 1.0    # 1 Hz terminal refresh
-SESSION_REFRESH = 30  # Refresh session YAML every 30s
+TICK_RATE = config.TICK_RATE
+DISPLAY_RATE = config.DISPLAY_RATE
+SESSION_REFRESH = config.SESSION_REFRESH
 
 # Base directory for race logs
 RACE_LOGS_DIR = os.path.join(os.path.dirname(__file__), 'race_logs')
+
+
+def _detect_session_type(conn):
+    """Best-effort detection of the current iRacing session type.
+
+    Returns the SessionType string from the iRacing session YAML for the
+    currently active session, or 'Session' as a neutral fallback. Any
+    exception while reading the YAML is intentionally swallowed — this
+    matches the original inline behavior.
+    """
+    try:
+        si = conn.session_info
+        if si and 'Sessions' in si:
+            sessions = si['Sessions']
+            session_num = conn.get('SessionNum')
+            if session_num is not None and session_num < len(sessions):
+                return sessions[session_num].get('SessionType', 'Session')
+    except Exception:
+        pass
+    return 'Session'
 
 
 def _create_session_dir(track_name, session_type):
@@ -37,6 +60,18 @@ def _create_session_dir(track_name, session_type):
 
     folder_name = f'{date_str}_{safe_track}_{safe_session}'
     session_dir = os.path.join(RACE_LOGS_DIR, folder_name)
+    # Avoid silently overwriting an existing session if two runs land in
+    # the same minute. Original behavior is preserved when there is no
+    # collision (same path returned). On collision a numeric suffix is
+    # appended.
+    if os.path.exists(session_dir):
+        suffix = 2
+        while True:
+            candidate = f'{session_dir}_{suffix}'
+            if not os.path.exists(candidate):
+                session_dir = candidate
+                break
+            suffix += 1
     os.makedirs(session_dir, exist_ok=True)
     return session_dir
 
@@ -47,7 +82,11 @@ def main():
     conn.connect()
     print("Verbunden mit iRacing!")
 
-    timing = TimingMonitor(conn)
+    # Per-track sector splits if defined in track_db, else 3 equal sectors
+    _track_key_for_sectors = get_track_key(conn.weekend_info)
+    _custom_splits = load_sector_splits(_track_key_for_sectors) if _track_key_for_sectors else None
+
+    timing = TimingMonitor(conn, sector_splits=_custom_splits)
     session = SessionMonitor(conn)
     track_mapper = TrackMapper()
     renderer = Renderer()
@@ -68,16 +107,7 @@ def main():
     session_info = session.get_session_info()
     track_name = session_info.get('track_name', 'Unknown') if session_info else 'Unknown'
     # Try to detect session type from iRacing
-    session_type = 'Session'
-    try:
-        si = conn.session_info
-        if si and 'Sessions' in si:
-            sessions = si['Sessions']
-            session_num = conn.get('SessionNum')
-            if session_num is not None and session_num < len(sessions):
-                session_type = sessions[session_num].get('SessionType', 'Session')
-    except Exception:
-        pass
+    session_type = _detect_session_type(conn)
 
     session_dir = _create_session_dir(track_name, session_type)
     data_logger = DataLogger(session_dir)
@@ -96,6 +126,8 @@ def main():
         'weather_data': None,
         'session_info': None,
         'map_status': None,
+        'pit_data': None,
+        'tire_data': None,
     }
 
     try:
@@ -103,6 +135,7 @@ def main():
             while True:
                 now = time.time()
                 conn.check_connection()
+                map_window.ensure_running()
 
                 on_track = conn.get('IsOnTrack')
                 on_track = bool(on_track) if on_track is not None else False
@@ -124,7 +157,10 @@ def main():
                     # Track map recording
                     if not track_mapper.mapping_complete:
                         lap_dist_pcts = conn.get('CarIdxLapDistPct')
-                        player_pct = lap_dist_pcts[player_idx] if lap_dist_pcts else None
+                        try:
+                            player_pct = lap_dist_pcts[player_idx] if lap_dist_pcts else None
+                        except (IndexError, TypeError):
+                            player_pct = None
                         speed = conn.get('Speed')
                         yaw_north = conn.get('YawNorth')
                         if yaw_north is None:
@@ -150,10 +186,12 @@ def main():
                         if positions and lap_dist_pcts:
                             for car_idx in range(len(positions)):
                                 pos = positions[car_idx]
-                                if pos <= 0:
+                                if pos is None or pos <= 0:
+                                    continue
+                                if car_idx >= len(lap_dist_pcts):
                                     continue
                                 pct = lap_dist_pcts[car_idx]
-                                if pct < 0:
+                                if pct is None or pct < 0:
                                     continue
                                 xy = track_mapper.get_position(pct)
                                 if xy is None:
@@ -188,6 +226,34 @@ def main():
 
                         display_cache['weather_data'] = session.get_weather()
                         display_cache['session_info'] = session.get_session_info()
+
+                        # Pit / fuel calculation
+                        try:
+                            lap_history = data_logger.get_lap_data() or []
+                            fuel_used_history = []
+                            for r in lap_history:
+                                try:
+                                    v = float(r.get('FuelUsed') or 0)
+                                except (TypeError, ValueError):
+                                    v = 0
+                                if v > 0:
+                                    fuel_used_history.append(v)
+                            display_cache['pit_data'] = compute_pit_window(
+                                fuel_level=conn.get('FuelLevel'),
+                                fuel_use_per_hour=conn.get('FuelUsePerHour'),
+                                last_lap_time=conn.get('LapLastLapTime') or
+                                              (timing_data.get('player', {}) or {}).get('last_lap'),
+                                lap_fuel_history=fuel_used_history,
+                            )
+                        except Exception:
+                            display_cache['pit_data'] = None
+
+                        # Tyre snapshot
+                        try:
+                            tdata = read_tires(conn)
+                            display_cache['tire_data'] = tdata if tires_has_data(tdata) else None
+                        except Exception:
+                            display_cache['tire_data'] = None
 
                         if track_mapper.mapping_complete:
                             src = 'DB' if track_saved or (track_key and not track_mapper.track_points) else 'Live'

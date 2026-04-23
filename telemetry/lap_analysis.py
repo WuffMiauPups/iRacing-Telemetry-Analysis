@@ -5,9 +5,8 @@ and generates multi-channel overlay plots showing where you're fast/slow/inconsi
 """
 
 import os
-import csv
+import sys
 import numpy as np
-from collections import defaultdict
 
 import matplotlib
 matplotlib.use('Agg')
@@ -15,146 +14,79 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.gridspec import GridSpec
 
-
-# Channels to plot (csv_column, display_name, unit, invert_y)
-CHANNELS = [
-    ('Speed_kmh',           'Speed',        'km/h',  False),
-    ('Throttle',            'Gas',          '%',     False),
-    ('Brake',               'Bremse',       '%',     False),
-    ('Gear',                'Gang',         '',      False),
-    ('SteeringWheelAngle',  'Lenkung',      'rad',   False),
-    ('LapDeltaToBestLap',   'Delta zu Best','s',     False),
-]
-
-# Number of resampled points per lap (0-100% track position)
-RESAMPLE_POINTS = 500
+from telemetry.lap_data import (
+    CHANNELS,
+    RESAMPLE_POINTS,
+    load_and_group_laps as _load_and_group_laps,
+    load_with_metadata,
+    filter_laps,
+    resample_lap as _resample_lap,
+    find_best_lap,
+    get_lap_times_from_summary as _get_lap_times_from_summary,
+)
 
 
-def _safe_float(val, default=None):
-    if val is None or val == '' or val == 'None':
-        return default
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return default
+def _find_best_lap(_laps_data, lap_times):
+    """Back-compat wrapper: older signature took (laps_data, lap_times)."""
+    return find_best_lap(lap_times)
 
 
-def _load_and_group_laps(csv_path):
-    """Load telemetry CSV and group rows by lap.
-
-    Returns dict: lap_num -> list of (pct, {channel: value}) sorted by pct.
-    Only includes laps where the car was moving and on track.
-    """
-    laps = defaultdict(list)
-
-    with open(csv_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            lap = _safe_float(row.get('Lap'))
-            pct = _safe_float(row.get('LapDistPct'))
-            speed = _safe_float(row.get('Speed_kmh'), 0)
-
-            if lap is None or pct is None or pct < 0:
-                continue
-            if speed < 5:  # Skip stationary data
-                continue
-
-            lap = int(lap)
-            values = {}
-            for col, _, _, _ in CHANNELS:
-                val = _safe_float(row.get(col))
-                if col in ('Throttle', 'Brake'):
-                    # Convert 0-1 to 0-100%
-                    if val is not None:
-                        val = val * 100.0
-                values[col] = val
-
-            laps[lap].append((pct, values))
-
-    # Sort each lap by track position
-    for lap_num in laps:
-        laps[lap_num].sort(key=lambda x: x[0])
-
-    return dict(laps)
-
-
-def _resample_lap(lap_data, channel, num_points=RESAMPLE_POINTS):
-    """Resample a lap's channel data to evenly spaced track positions.
-
-    Returns (pct_array, value_array) with num_points entries.
-    """
-    pcts = [p for p, v in lap_data if v.get(channel) is not None]
-    vals = [v[channel] for p, v in lap_data if v.get(channel) is not None]
-
-    if len(pcts) < 10:
-        return None, None
-
-    target_pcts = np.linspace(min(pcts), max(pcts), num_points)
-    resampled = np.interp(target_pcts, pcts, vals)
-
-    return target_pcts * 100, resampled  # Convert to 0-100%
-
-
-def _find_best_lap(laps_data, lap_times):
-    """Find the best lap number (fastest valid lap)."""
-    best_time = float('inf')
-    best_lap = None
-    for lap_num, lap_time in lap_times.items():
-        if lap_time and 0 < lap_time < best_time:
-            best_time = lap_time
-            best_lap = lap_num
-    return best_lap
-
-
-def _get_lap_times_from_data(laps_data):
-    """Estimate lap times from telemetry data timestamps."""
-    # We don't have direct lap times in the grouped data,
-    # so we'll use the Timestamp span of each lap
-    # Actually, we should read from lap_summary.csv instead
-    return {}
-
-
-def _get_lap_times_from_summary(session_dir):
-    """Read lap times from lap_summary.csv."""
-    lap_times = {}
-    summary_path = os.path.join(session_dir, 'lap_summary.csv')
-    if not os.path.exists(summary_path):
-        return lap_times
-
-    with open(summary_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            lap = _safe_float(row.get('Lap'))
-            lt = _safe_float(row.get('LapTime'))
-            if lap is not None and lt is not None and lt > 0:
-                lap_times[int(lap)] = lt
-
-    return lap_times
-
-
-def generate_lap_analysis(session_dir):
+def generate_lap_analysis(session_dir, include_all=False):
     """Generate comprehensive lap overlay analysis plots.
 
     Creates:
     - lap_analysis.png: Multi-channel overlay with consistency bands
+    - lap_delta_analysis.png: Delta-to-best-lap plots
+    - mini_sectors.png: 21 mini-sector heatmap + theoretical best (best-effort)
+    - brake_throttle_variance.png: Per-corner consistency (best-effort)
 
     Args:
         session_dir: Path to the session folder containing telemetry_detailed.csv
+        include_all: If True, skip outlap/inlap/start/finish filtering.
     """
     csv_path = os.path.join(session_dir, 'telemetry_detailed.csv')
     if not os.path.exists(csv_path):
         return None
 
-    # Load and group data
-    laps_data = _load_and_group_laps(csv_path)
+    # Load everything — laps dict, pit/flag metadata, race-flag bounds.
+    laps_data, lap_meta, race_bounds = load_with_metadata(csv_path)
     if not laps_data:
         return None
 
-    # Filter out laps with too little data (pit laps, resets)
-    valid_laps = {k: v for k, v in laps_data.items()
-                  if len(v) > 50 and k >= 0}
+    # Resolve session_type for filter semantics (from session_meta.json if
+    # present, else parse from folder name like "..._Race" / "..._Practice").
+    session_type = None
+    try:
+        from telemetry.session_meta import load_session_meta
+        meta_file = load_session_meta(session_dir)
+        if meta_file:
+            session_type = meta_file.get('session_type')
+    except Exception as e:
+        print(f"[lap_analysis] loading session_meta: {e}", file=sys.stderr)
+    if not session_type:
+        folder = os.path.basename(os.path.normpath(session_dir))
+        for suffix in ('Race', 'Qualify', 'Lone_Qualify', 'Practice',
+                        'Offline_Testing', 'Time_Attack'):
+            if folder.endswith('_' + suffix):
+                session_type = suffix.replace('_', ' ')
+                break
+
+    # Drop laps with too little data first (pit laps, resets, aborted).
+    sized = {k: v for k, v in laps_data.items()
+             if len(v) > 50 and k >= 0}
+
+    # Then apply outlap/inlap/start/finish filtering.
+    valid_laps, skip_reasons = filter_laps(sized, lap_meta, race_bounds,
+                                             session_type, include_all=include_all)
+
+    if skip_reasons:
+        print(f"[lap_analysis] skipped {len(skip_reasons)} lap(s): "
+              + ", ".join(f"R{k}={v}" for k, v in sorted(skip_reasons.items())))
 
     if len(valid_laps) < 1:
+        print("[lap_analysis] no laps remain after filtering; "
+              "call with include_all=True to bypass.",
+              file=sys.stderr)
         return None
 
     lap_nums = sorted(valid_laps.keys())
@@ -325,6 +257,42 @@ def generate_lap_analysis(session_dir):
     # --- Generate delta-to-best plot ---
     _generate_delta_plot(session_dir, valid_laps, lap_nums, best_lap,
                          lap_colors, lap_times)
+
+    # --- Mini-sector analysis ---
+    try:
+        from telemetry.mini_sectors import (
+            compute_lap_sectors, compute_theoretical_best, render_sector_plot,
+        )
+        # Pass the full LapTime so sector 0 and sector 20 anchor correctly
+        # at the S/F line (t=0 and t=LapTime respectively). lap_times keys
+        # are now 0-based (see get_lap_times_from_summary docstring).
+        laps_sectors = {ln: compute_lap_sectors(valid_laps[ln],
+                                                 lap_time=lap_times.get(ln))
+                        for ln in lap_nums}
+        tb_total, donors = compute_theoretical_best(laps_sectors)
+        render_sector_plot(session_dir, laps_sectors, lap_times, best_lap,
+                            tb_total, donors)
+        if tb_total is not None:
+            mins = int(tb_total // 60)
+            secs = tb_total - mins * 60
+            print(f"[lap_analysis] Theoretische Bestzeit: {mins}:{secs:05.2f}  "
+                  f"(Sektor-Donors: {donors})")
+    except Exception as e:
+        print(f"[lap_analysis] mini_sectors failed: {e}", file=sys.stderr)
+
+    # --- Brake/throttle variance analysis ---
+    try:
+        from telemetry.variance_analysis import (
+            detect_brake_points, detect_throttle_releases,
+            cluster_events_across_laps, render_variance_plot,
+        )
+        brake_events = {ln: detect_brake_points(valid_laps[ln]) for ln in lap_nums}
+        throttle_events = {ln: detect_throttle_releases(valid_laps[ln]) for ln in lap_nums}
+        brake_clusters = cluster_events_across_laps(brake_events)
+        throttle_clusters = cluster_events_across_laps(throttle_events)
+        render_variance_plot(session_dir, brake_clusters, throttle_clusters)
+    except Exception as e:
+        print(f"[lap_analysis] variance_analysis failed: {e}", file=sys.stderr)
 
     return output_path
 

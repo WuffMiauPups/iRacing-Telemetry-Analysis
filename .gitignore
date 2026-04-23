@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual envs
+venv/
+env/
+.venv/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Project-specific: live session output stays out of git
+race_logs/
+
+# Claude Code worktrees
+.claude/
+
+# Unrelated side-projects that happen to share the folder
+alpaca-trading-bot/
+
+# Local environment overrides
+.env
+.env.local
+
+# Stray debug artifacts
+debug_telemetry.log

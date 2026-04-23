@@ -1,7 +1,11 @@
 import csv
 import os
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import List, Optional
+
+import config
 
 
 # All telemetry variables to log per tick (10Hz)
@@ -18,6 +22,7 @@ TICK_COLUMNS = [
     'Gear',
     'RPM',
     'SteeringWheelAngle',
+    'SteeringWheelTorque',
     'Position',
     'ClassPosition',
     'LapCurrentLapTime',
@@ -63,6 +68,45 @@ LAP_COLUMNS = [
 ]
 
 
+@dataclass
+class _LapAccumulator:
+    """Per-lap aggregation state.
+
+    Replaces a fistful of loose self._lap_* fields. Atomically reset
+    via reset() so a partially-initialised lap can never leak data
+    from the previous one.
+    """
+    start_fuel: Optional[float] = None
+    start_pos: Optional[int] = None
+    start_incidents: int = 0
+    last_gear: Optional[int] = None
+    gear_shifts: int = 0
+    speeds: List[float] = field(default_factory=list)
+    throttles: List[float] = field(default_factory=list)
+    brakes: List[float] = field(default_factory=list)
+
+    def reset(self, start_fuel, start_pos, start_incidents, start_gear):
+        self.start_fuel = start_fuel
+        self.start_pos = start_pos
+        self.start_incidents = start_incidents
+        self.last_gear = start_gear
+        self.gear_shifts = 0
+        self.speeds = []
+        self.throttles = []
+        self.brakes = []
+
+    def record(self, speed_kmh, throttle, brake, gear):
+        if speed_kmh is not None and speed_kmh > 3.6:  # > 1 m/s
+            self.speeds.append(speed_kmh)
+        if throttle is not None:
+            self.throttles.append(throttle)
+        if brake is not None:
+            self.brakes.append(brake)
+        if gear is not None and self.last_gear is not None and gear != self.last_gear:
+            self.gear_shifts += 1
+        self.last_gear = gear
+
+
 class DataLogger:
     """Logs telemetry data to CSV files.
 
@@ -99,15 +143,8 @@ class DataLogger:
         self._continuous_lap = 0
         self._iracing_lap = None  # Last seen CarIdxLap value
 
-        # Per-lap aggregation state
-        self._lap_start_fuel = None
-        self._lap_speeds = []
-        self._lap_throttles = []
-        self._lap_brakes = []
-        self._lap_gear_shifts = 0
-        self._last_gear = None
-        self._lap_incidents_start = 0
-        self._lap_start_pos = None
+        # Per-lap aggregation state (atomic via dataclass)
+        self._lap = _LapAccumulator()
         self._last_valid_position = None  # Last position > 0
 
         self._tick_count = 0
@@ -148,22 +185,23 @@ class DataLogger:
             'Timestamp': round(elapsed, 2),
             'SessionTime': conn.get('SessionTime'),
             'Lap': self._continuous_lap,
-            'LapDistPct': round(pct, 5) if pct else None,
+            'LapDistPct': round(pct, 5) if pct is not None else None,
             'Speed_ms': round(speed, 2),
             'Speed_kmh': round(speed * 3.6, 1),
             'Throttle': round(throttle, 3) if throttle is not None else None,
             'Brake': round(brake, 3) if brake is not None else None,
             'Clutch': round(conn.get('Clutch') or 0, 3),
             'Gear': gear,
-            'RPM': round(rpm, 0) if rpm else None,
+            'RPM': round(rpm, 0) if rpm is not None else None,
             'SteeringWheelAngle': round(conn.get('SteeringWheelAngle') or 0, 4),
+            'SteeringWheelTorque': round(conn.get('SteeringWheelTorque') or 0, 4),
             'Position': position if position and position > 0 else self._last_valid_position,
             'ClassPosition': conn.get('PlayerCarClassPosition'),
             'LapCurrentLapTime': conn.get('LapCurrentLapTime'),
             'LastLapTime': last_lap if last_lap and last_lap > 0 else None,
             'BestLapTime': best_lap if best_lap and best_lap > 0 else None,
-            'Gap_Ahead_s': round(gap_ahead, 3) if gap_ahead else None,
-            'Gap_Behind_s': round(gap_behind, 3) if gap_behind else None,
+            'Gap_Ahead_s': round(gap_ahead, 3) if gap_ahead is not None else None,
+            'Gap_Behind_s': round(gap_behind, 3) if gap_behind is not None else None,
             'Incidents': incidents,
             'FuelLevel': round(conn.get('FuelLevel') or 0, 3),
             'FuelUsePerHour': round(conn.get('FuelUsePerHour') or 0, 3),
@@ -189,7 +227,7 @@ class DataLogger:
         self._tick_writer.writerow(row)
         self._tick_count += 1
 
-        if self._tick_count % 100 == 0:
+        if self._tick_count % config.TICK_FLUSH_INTERVAL == 0:
             self._tick_file.flush()
 
         # --- Detect new lap (handles iRacing lap counter resets) ---
@@ -204,52 +242,44 @@ class DataLogger:
 
             # Start tracking new lap
             self._iracing_lap = iracing_lap
-            self._lap_start_fuel = conn.get('FuelLevel')
-            self._lap_speeds = []
-            self._lap_throttles = []
-            self._lap_brakes = []
-            self._lap_gear_shifts = 0
-            self._last_gear = gear
-            self._lap_incidents_start = incidents
-            self._lap_start_pos = self._last_valid_position or position
+            self._lap.reset(
+                start_fuel=conn.get('FuelLevel'),
+                start_pos=self._last_valid_position or position,
+                start_incidents=incidents,
+                start_gear=gear,
+            )
 
         # Accumulate per-lap stats
-        if speed > 1.0:
-            self._lap_speeds.append(speed * 3.6)
-        if throttle is not None:
-            self._lap_throttles.append(throttle)
-        if brake is not None:
-            self._lap_brakes.append(brake)
-        if gear is not None and self._last_gear is not None and gear != self._last_gear:
-            self._lap_gear_shifts += 1
-        self._last_gear = gear
+        self._lap.record(speed * 3.6 if speed else None, throttle, brake, gear)
 
     def _finalize_lap(self, current_pos, current_incidents, current_fuel, lap_time):
         """Write a completed lap to the lap summary CSV."""
+        lap = self._lap
+
         # Position change (positive = gained positions)
         pos_change = 0
-        start_pos = self._lap_start_pos
+        start_pos = lap.start_pos
         if start_pos and start_pos > 0 and current_pos and current_pos > 0:
             pos_change = start_pos - current_pos
 
         # Fuel used — clamp to 0 if negative (refueled/reset)
         fuel_used = 0
-        if self._lap_start_fuel is not None and current_fuel is not None:
-            fuel_used = self._lap_start_fuel - current_fuel
+        if lap.start_fuel is not None and current_fuel is not None:
+            fuel_used = lap.start_fuel - current_fuel
             if fuel_used < 0:
                 fuel_used = 0  # Refueled — don't show negative
 
         # Incidents — clamp to 0 if negative (counter reset)
         incidents_this_lap = 0
         if current_incidents is not None:
-            incidents_this_lap = current_incidents - self._lap_incidents_start
+            incidents_this_lap = current_incidents - lap.start_incidents
             if incidents_this_lap < 0:
                 incidents_this_lap = 0  # Counter reset
 
-        avg_speed = sum(self._lap_speeds) / len(self._lap_speeds) if self._lap_speeds else 0
-        max_speed = max(self._lap_speeds) if self._lap_speeds else 0
-        avg_throttle = sum(self._lap_throttles) / len(self._lap_throttles) if self._lap_throttles else 0
-        avg_brake = sum(self._lap_brakes) / len(self._lap_brakes) if self._lap_brakes else 0
+        avg_speed = sum(lap.speeds) / len(lap.speeds) if lap.speeds else 0
+        max_speed = max(lap.speeds) if lap.speeds else 0
+        avg_throttle = sum(lap.throttles) / len(lap.throttles) if lap.throttles else 0
+        avg_brake = sum(lap.brakes) / len(lap.brakes) if lap.brakes else 0
 
         # Use last valid position if current is 0/None
         display_pos = current_pos if current_pos and current_pos > 0 else self._last_valid_position
@@ -265,7 +295,7 @@ class DataLogger:
             'MaxSpeed_kmh': round(max_speed, 1),
             'AvgThrottle': round(avg_throttle * 100, 1),
             'AvgBrake': round(avg_brake * 100, 1),
-            'GearShifts': self._lap_gear_shifts,
+            'GearShifts': lap.gear_shifts,
         }
 
         self._lap_writer.writerow(row)

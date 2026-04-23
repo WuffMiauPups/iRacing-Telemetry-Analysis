@@ -36,12 +36,13 @@ def get_track_key(weekend_info):
     return track_name
 
 
-def save_track(track_key, normalized_points):
+def save_track(track_key, normalized_points, sector_splits=None):
     """Save a track layout to the database.
 
     Args:
         track_key: e.g. 'Hockenheimring Baden-Württemberg - Grand Prix'
         normalized_points: List of (pct, x, y) tuples from TrackMapper
+        sector_splits: Optional list of pct boundaries for non-default sectors
     """
     os.makedirs(DB_DIR, exist_ok=True)
 
@@ -53,6 +54,8 @@ def save_track(track_key, normalized_points):
         'point_count': len(normalized_points),
         'points': [[pct, x, y] for pct, x, y in normalized_points],
     }
+    if sector_splits:
+        data['sector_splits'] = list(sector_splits)
 
     with open(filepath, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2)
@@ -79,6 +82,23 @@ def load_track(track_key):
         return points
     except Exception:
         return None
+
+
+def load_sector_splits(track_key):
+    """Load custom sector splits for a track, if defined. None otherwise."""
+    filename = _sanitize_filename(track_key) + '.json'
+    filepath = os.path.join(DB_DIR, filename)
+    if not os.path.exists(filepath):
+        return None
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        splits = data.get('sector_splits')
+        if splits and isinstance(splits, list) and len(splits) >= 2:
+            return [float(s) for s in splits]
+    except Exception:
+        return None
+    return None
 
 
 def list_tracks():

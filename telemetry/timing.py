@@ -1,8 +1,27 @@
+import os
 import time
 
+import config
 
-# Default sector splits (3 equal sectors)
-DEFAULT_SECTOR_SPLITS = [0.333, 0.666, 1.0]
+
+# Default sector splits (3 equal sectors) — re-exported for backward compat.
+DEFAULT_SECTOR_SPLITS = config.DEFAULT_SECTOR_SPLITS
+
+
+def _safe_idx(arr, i):
+    """Return arr[i] if the index is valid, else None.
+
+    Defensive helper for the iRacing CarIdx* arrays. The arrays are normally
+    long enough, but during session changes / connection re-init they can be
+    shorter than expected, return None entries, or briefly be wrong types.
+    """
+    if arr is None:
+        return None
+    try:
+        v = arr[i]
+    except (IndexError, TypeError):
+        return None
+    return v
 
 
 class SectorTracker:
@@ -93,10 +112,10 @@ class CatchCalculator:
     Final delta = (lap_weight * ema_delta) + (live_weight * live_delta)
     """
 
-    def __init__(self, alpha=0.4, lap_weight=0.6, live_weight=0.4):
-        self.alpha = alpha            # EMA smoothing factor
-        self.lap_weight = lap_weight  # Weight for EMA-based pace delta
-        self.live_weight = live_weight  # Weight for live gap trend
+    def __init__(self, alpha=None, lap_weight=None, live_weight=None):
+        self.alpha = alpha if alpha is not None else config.EMA_ALPHA
+        self.lap_weight = lap_weight if lap_weight is not None else config.LAP_WEIGHT
+        self.live_weight = live_weight if live_weight is not None else config.LIVE_WEIGHT
 
         self._ema_pace = {}           # car_idx -> current EMA pace (single float)
         self._last_lap_num = {}       # car_idx -> last seen lap number
@@ -104,7 +123,7 @@ class CatchCalculator:
 
         # Live gap tracking: (timestamp, gap) per car pair
         self._gap_history = {}
-        self._gap_history_max = 30
+        self._gap_history_max = config.GAP_HISTORY_MAX
 
     def record_lap(self, car_idx, lap_num, lap_time):
         """Record a completed lap time and update the EMA pace.
@@ -121,10 +140,18 @@ class CatchCalculator:
 
         self._last_lap_num[car_idx] = lap_num
 
-        # Filter outlier laps BEFORE updating EMA (>7% slower = off-track, incident, pit exit)
+        # Filter obviously broken laps BEFORE updating EMA.
+        # Some sessions emit tiny/invalid lap times (pit reset, teleport, timing glitches).
+        if lap_time < config.LAP_TIME_FILTER_MIN_S:
+            return
+
+        # Keep the existing slow-lap filter, and add a "too fast to be real" guard.
         if car_idx in self._ema_pace:
-            if lap_time > self._ema_pace[car_idx] * 1.07:
+            ema = self._ema_pace[car_idx]
+            if lap_time > ema * config.LAP_TIME_FILTER_MAX_FACTOR:
                 return  # Discard — don't let it poison the pace estimate
+            if lap_time < ema * config.LAP_TIME_FILTER_MIN_FACTOR:
+                return
 
         if car_idx not in self._ema_pace:
             # First lap — initialize EMA
@@ -153,6 +180,15 @@ class CatchCalculator:
         if key not in self._gap_history:
             self._gap_history[key] = []
 
+        # Reject impossible one-sample spikes (commonly caused by S/F wrap in EstTime).
+        if self._gap_history[key]:
+            prev_t, prev_gap = self._gap_history[key][-1]
+            dt = now - prev_t
+            if 0 < dt <= 2.0:
+                gap_rate = abs(gap_seconds - prev_gap) / dt
+                if gap_rate > config.GAP_RATE_MAX:
+                    return
+
         self._gap_history[key].append((now, gap_seconds))
 
         if len(self._gap_history[key]) > self._gap_history_max:
@@ -161,7 +197,7 @@ class CatchCalculator:
     def get_live_delta_per_second(self, player_idx, other_idx):
         """How fast the gap is changing (seconds/second).
 
-        Uses linear regression over the last 30s of gap samples.
+        Uses a trimmed average of per-sample gap rates over the last 30s.
         Positive = gap shrinking (catching). Negative = gap growing.
         """
         key = (player_idx, other_idx)
@@ -169,24 +205,37 @@ class CatchCalculator:
         if not samples or len(samples) < 3:
             return None
 
-        cutoff = time.time() - 30.0
+        cutoff = time.time() - config.GAP_HISTORY_WINDOW_S
         recent = [(t, g) for t, g in samples if t >= cutoff]
         if len(recent) < 3:
             return None
 
-        n = len(recent)
-        t0 = recent[0][0]
-        sum_t = sum(t - t0 for t, _ in recent)
-        sum_g = sum(g for _, g in recent)
-        sum_tt = sum((t - t0) ** 2 for t, _ in recent)
-        sum_tg = sum((t - t0) * g for t, g in recent)
+        rates = []
+        for i in range(1, len(recent)):
+            t0, g0 = recent[i - 1]
+            t1, g1 = recent[i]
+            dt = t1 - t0
+            if dt <= 0:
+                continue
 
-        denom = n * sum_tt - sum_t ** 2
-        if abs(denom) < 1e-10:
+            # Positive => catching (gap shrinking)
+            rate = (g0 - g1) / dt
+
+            # Ignore physically implausible rates from telemetry spikes.
+            if abs(rate) > config.GAP_RATE_MAX:
+                continue
+
+            rates.append(rate)
+
+        if len(rates) < 2:
             return None
 
-        slope = (n * sum_tg - sum_t * sum_g) / denom
-        return -slope  # Positive = catching
+        rates.sort()
+        trim = int(len(rates) * 0.2)
+        if trim > 0 and len(rates) > (trim * 2):
+            rates = rates[trim:-trim]
+
+        return sum(rates) / len(rates)
 
     def calc_catch_time(self, gap_seconds, player_idx, other_idx, my_pace, other_pace):
         """Calculate catch time using blended EMA pace + live gap trend.
@@ -223,7 +272,11 @@ class CatchCalculator:
                 'live_delta_per_sec': None, 'gap': round(gap_seconds, 2),
             }
 
-        if abs(blended) < 0.005:
+        # Safety clamp against rare outliers so the UI doesn't show nonsense
+        # like +/- 80s per lap due to a single bad telemetry sample.
+        blended = max(-config.DELTA_CLAMP, min(config.DELTA_CLAMP, blended))
+
+        if abs(blended) < config.DELTA_DEADBAND:
             return {
                 'laps_to_catch': None, 'seconds_to_catch': None,
                 'gaining': False, 'per_lap_delta': round(blended, 3),
@@ -251,11 +304,11 @@ class TimingMonitor:
     def __init__(self, connection, sector_splits=None):
         self.conn = connection
         self.sector_tracker = SectorTracker(sector_splits)
-        self.catch_calc = CatchCalculator(
-            alpha=0.4,         # EMA: P_n = 0.4*L_n + 0.6*P_(n-1)
-            lap_weight=0.6,    # 60% from EMA pace
-            live_weight=0.4,   # 40% from live gap trend
-        )
+        self.catch_calc = CatchCalculator()
+        gap_mode = os.getenv('IRACING_GAP_MODE', config.GAP_MODE_DEFAULT).strip().lower()
+        if gap_mode not in config.GAP_MODES_VALID:
+            gap_mode = config.GAP_MODE_DEFAULT
+        self._gap_mode = gap_mode
 
     def get_player_idx(self):
         return self.conn.get('PlayerCarIdx')
@@ -307,8 +360,13 @@ class TimingMonitor:
             return
 
         for car_idx, pos in enumerate(positions):
-            if pos > 0:  # Only track cars that have started
-                self.sector_tracker.update(car_idx, lap_dist_pcts[car_idx], laps[car_idx])
+            if pos is None or pos <= 0:
+                continue
+            pct = _safe_idx(lap_dist_pcts, car_idx)
+            lap = _safe_idx(laps, car_idx)
+            if pct is None or lap is None:
+                continue
+            self.sector_tracker.update(car_idx, pct, lap)
 
     def update_catch_calculator(self):
         """Feed latest lap times into the catch calculator for all cars."""
@@ -320,15 +378,80 @@ class TimingMonitor:
             return
 
         for car_idx, pos in enumerate(positions):
-            if pos > 0 and last_lap_times[car_idx] > 0:
-                self.catch_calc.record_lap(car_idx, laps[car_idx], last_lap_times[car_idx])
+            if pos is None or pos <= 0:
+                continue
+            llt = _safe_idx(last_lap_times, car_idx)
+            lap = _safe_idx(laps, car_idx)
+            if llt is None or lap is None or llt <= 0:
+                continue
+            self.catch_calc.record_lap(car_idx, lap, llt)
 
     def _get_gap_to_car(self, player_idx, other_idx):
-        """Estimate gap in seconds between two cars using LapDistPct and EstTime."""
+        """Estimate gap in seconds between two cars.
+
+        Uses lap progress as the primary source (stable across start/finish wrap),
+        then blends with CarIdxEstTime only if both sources roughly agree.
+        """
+        if self._gap_mode == 'legacy':
+            return self._get_gap_to_car_legacy(player_idx, other_idx)
+
+        pcts = self.conn.get('CarIdxLapDistPct')
+        laps = self.conn.get('CarIdxLap')
+        last_times = self.conn.get('CarIdxLastLapTime')
+        best_times = self.conn.get('CarIdxBestLapTime')
+
+        my_pct = _safe_idx(pcts, player_idx)
+        other_pct = _safe_idx(pcts, other_idx)
+        my_lap = _safe_idx(laps, player_idx)
+        other_lap = _safe_idx(laps, other_idx)
+
+        gap_progress = None
+        if (my_pct is not None and other_pct is not None and
+                my_lap is not None and other_lap is not None and
+                my_pct >= 0 and other_pct >= 0):
+
+            my_last = _safe_idx(last_times, player_idx)
+            my_best = _safe_idx(best_times, player_idx)
+            ref_time = None
+            if my_last is not None and my_last > 0:
+                ref_time = my_last
+            elif my_best is not None and my_best > 0:
+                ref_time = my_best
+
+            if ref_time is not None:
+                pct_diff = (other_lap + other_pct) - (my_lap + my_pct)
+                gap_progress = abs(pct_diff * ref_time)
+
+        gap_est = None
+        est_times = self.conn.get('CarIdxEstTime')
+        my_est = _safe_idx(est_times, player_idx)
+        other_est = _safe_idx(est_times, other_idx)
+        if (my_est is not None and other_est is not None and
+                my_est > 0 and other_est > 0):
+            gap_est = abs(other_est - my_est)
+
+        if self._gap_mode == 'progress':
+            return gap_progress
+
+        if gap_progress is not None and gap_est is not None:
+            # CarIdxEstTime can jump by ~1 lap near the line; trust progress on mismatch.
+            if abs(gap_est - gap_progress) > max(4.0, gap_progress * 0.6):
+                return gap_progress
+            return (0.6 * gap_progress) + (0.4 * gap_est)
+
+        if gap_progress is not None:
+            return gap_progress
+        return gap_est
+
+    def _get_gap_to_car_legacy(self, player_idx, other_idx):
+        """Previous gap estimator kept as fallback for safe rollout."""
         # Try iRacing's estimated time first
         est_times = self.conn.get('CarIdxEstTime')
-        if est_times and est_times[player_idx] > 0 and est_times[other_idx] > 0:
-            gap = abs(est_times[other_idx] - est_times[player_idx])
+        my_est = _safe_idx(est_times, player_idx)
+        other_est = _safe_idx(est_times, other_idx)
+        if (my_est is not None and other_est is not None and
+                my_est > 0 and other_est > 0):
+            gap = abs(other_est - my_est)
             if gap > 0:
                 return gap
 
@@ -336,17 +459,16 @@ class TimingMonitor:
         pcts = self.conn.get('CarIdxLapDistPct')
         laps = self.conn.get('CarIdxLap')
         last_times = self.conn.get('CarIdxLastLapTime')
-        if pcts is None or laps is None or last_times is None:
-            return None
 
-        my_pct = pcts[player_idx]
-        other_pct = pcts[other_idx]
-        my_lap = laps[player_idx]
-        other_lap = laps[other_idx]
+        my_pct = _safe_idx(pcts, player_idx)
+        other_pct = _safe_idx(pcts, other_idx)
+        my_lap = _safe_idx(laps, player_idx)
+        other_lap = _safe_idx(laps, other_idx)
+        ref_time = _safe_idx(last_times, player_idx)
 
-        # Use player's last lap time as reference
-        ref_time = last_times[player_idx] if last_times[player_idx] > 0 else None
-        if ref_time is None:
+        if (my_pct is None or other_pct is None or
+                my_lap is None or other_lap is None or
+                ref_time is None or ref_time <= 0):
             return None
 
         # Calculate distance difference considering lap difference
@@ -363,8 +485,8 @@ class TimingMonitor:
         if positions is None:
             return None
 
-        my_pos = positions[player_idx]
-        if my_pos == 0:
+        my_pos = _safe_idx(positions, player_idx)
+        if my_pos is None or my_pos == 0:
             return None
 
         last_lap_times = self.conn.get('CarIdxLastLapTime')
@@ -376,14 +498,18 @@ class TimingMonitor:
         def build_entry(car_idx, label):
             if car_idx is None:
                 return None
-            last_lap = last_lap_times[car_idx] if last_lap_times and last_lap_times[car_idx] > 0 else None
-            best_lap = best_lap_times[car_idx] if best_lap_times and best_lap_times[car_idx] > 0 else None
+            last_lap = _safe_idx(last_lap_times, car_idx)
+            if last_lap is None or last_lap <= 0:
+                last_lap = None
+            best_lap = _safe_idx(best_lap_times, car_idx)
+            if best_lap is None or best_lap <= 0:
+                best_lap = None
             return {
                 'label': label,
                 'car_idx': car_idx,
                 'car_number': self.get_car_number(car_idx),
                 'driver_name': self.get_driver_name(car_idx),
-                'position': positions[car_idx],
+                'position': _safe_idx(positions, car_idx),
                 'last_lap': last_lap,
                 'best_lap': best_lap,
                 'sectors': self.sector_tracker.get_last_lap_sectors(car_idx),
@@ -395,14 +521,14 @@ class TimingMonitor:
         # Feed live gap data for real-time trend tracking
         if ahead_idx is not None:
             gap_ahead = self._get_gap_to_car(player_idx, ahead_idx)
-            if gap_ahead:
+            if gap_ahead is not None:
                 self.catch_calc.record_gap(player_idx, ahead_idx, gap_ahead)
         else:
             gap_ahead = None
 
         if behind_idx is not None:
             gap_behind = self._get_gap_to_car(player_idx, behind_idx)
-            if gap_behind:
+            if gap_behind is not None:
                 self.catch_calc.record_gap(behind_idx, player_idx, gap_behind)
         else:
             gap_behind = None
@@ -421,7 +547,7 @@ class TimingMonitor:
         if behind_idx is not None:
             behind_pace = self.catch_calc.get_pace(behind_idx)
             # Flip perspective: the car behind is trying to catch ME
-            if gap_behind and behind_pace and my_pace:
+            if gap_behind is not None and behind_pace is not None and my_pace is not None:
                 catch_behind = self.catch_calc.calc_catch_time(
                     gap_behind, behind_idx, player_idx, behind_pace, my_pace
                 )

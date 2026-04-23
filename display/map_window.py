@@ -3,6 +3,8 @@ import threading
 import queue
 import os
 
+import config
+
 
 # Car colors by position bracket
 CAR_COLORS = [
@@ -39,15 +41,18 @@ class MapWindow:
     Shutdown is handled via a flag that the tkinter thread polls.
     """
 
-    def __init__(self, width=700, height=600):
-        self.width = width
-        self.height = height
+    def __init__(self, width=None, height=None):
+        self.width = width if width is not None else config.MAP_WINDOW_WIDTH
+        self.height = height if height is not None else config.MAP_WINDOW_HEIGHT
         self._data_queue = queue.Queue(maxsize=5)
         self._running = threading.Event()
         self._thread = None
         self._root = None
         self._canvas = None
         self.margin = 50
+        # Cached snapshot of the latest data so a watchdog restart can
+        # immediately repaint without waiting for the next telemetry push.
+        self._last_data = None
 
     def start(self):
         """Start the map window in a separate thread."""
@@ -123,7 +128,7 @@ class MapWindow:
 
         # Schedule next poll — always from tkinter thread
         if self._root and self._running.is_set():
-            self._root.after(100, self._poll_data)
+            self._root.after(config.MAP_POLL_MS, self._poll_data)
 
     def update_data(self, track_outline, cars, mapping_progress=None):
         """Called from the telemetry thread to push new data (thread-safe)."""
@@ -132,6 +137,7 @@ class MapWindow:
             'cars': cars,
             'mapping_progress': mapping_progress,
         }
+        self._last_data = data
         # Drop old data if queue is full (we only care about latest)
         try:
             self._data_queue.put_nowait(data)
@@ -142,6 +148,29 @@ class MapWindow:
                 pass
             try:
                 self._data_queue.put_nowait(data)
+            except queue.Full:
+                pass
+
+    def is_alive(self):
+        """Whether the GUI thread is still running."""
+        return self._thread is not None and self._thread.is_alive() and self._running.is_set()
+
+    def ensure_running(self):
+        """Watchdog hook: restart the window if its thread died unexpectedly.
+
+        Safe to call from the main loop. No-op when the GUI is healthy.
+        """
+        if self.is_alive():
+            return
+        # Best-effort cleanup of the old thread reference
+        self._thread = None
+        self._root = None
+        self._canvas = None
+        self.start()
+        # Replay last known data so the new window isn't blank
+        if self._last_data is not None:
+            try:
+                self._data_queue.put_nowait(self._last_data)
             except queue.Full:
                 pass
 

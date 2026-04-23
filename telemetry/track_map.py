@@ -1,6 +1,7 @@
 import math
 import time
 
+import config
 from telemetry.track_db import save_track, load_track
 
 
@@ -14,18 +15,22 @@ class TrackMapper:
     NOT based on lap counter (which fires too early when exiting pits).
     """
 
-    def __init__(self, sample_interval=0.003):
-        self.sample_interval = sample_interval
+    def __init__(self, sample_interval=None):
+        self.sample_interval = sample_interval if sample_interval is not None else config.TRACK_SAMPLE_INTERVAL
         self.track_points = []     # (pct, world_x, world_z)
         self._sampled_pcts = set() # Track which 1% buckets we've covered
         self.mapping_complete = False
         self._normalized_points = []
+        self._track_key = None
 
         # World position state
         self._world_x = 0.0
         self._world_z = 0.0
         self._last_time = None
         self._last_pct = None
+
+        # Pre-baked lookup table built after mapping completes / loads
+        self._lut = None  # list of (x, y) at TRACK_LUT_BUCKETS evenly spaced pct
 
     def record_tick(self, lap_dist_pct, speed, yaw_north):
         """Record a position tick during the mapping lap.
@@ -51,8 +56,12 @@ class TrackMapper:
         dt = now - self._last_time
         self._last_time = now
 
-        # Skip bad time deltas
+        # Skip bad time deltas. After dropping a sample we must NOT integrate
+        # the next dt against the now-stale yaw — reset the timing reference
+        # so the integrator restarts cleanly on the next valid tick.
         if dt <= 0 or dt > 0.5:
+            self._last_time = None
+            self._last_pct = None
             return
 
         # Integrate world position when moving
@@ -96,13 +105,14 @@ class TrackMapper:
             return True
 
         coverage = self.check_coverage()
-        if coverage >= 0.92 and len(self.track_points) >= 100:
+        if (coverage >= config.TRACK_COVERAGE_THRESHOLD and
+                len(self.track_points) >= config.TRACK_MIN_POINTS_FOR_FINISH):
             return self.finish_mapping()
         return False
 
     def finish_mapping(self):
         """Normalize recorded coordinates to 0-1 range for rendering."""
-        if len(self.track_points) < 50:
+        if len(self.track_points) < config.TRACK_MIN_POINTS_FOR_NORMALIZE:
             return False
 
         self.track_points.sort(key=lambda p: p[0])
@@ -129,19 +139,59 @@ class TrackMapper:
             self._normalized_points.append((pct, nx, ny))
 
         self.mapping_complete = True
+        self._build_lut()
         return True
+
+    def _build_lut(self):
+        """Pre-compute a fixed-resolution lookup table for get_position.
+
+        Once mapping is done the layout never changes. We pre-compute
+        TRACK_LUT_BUCKETS evenly-spaced positions so per-tick lookups
+        become O(1) instead of O(log N) per car. The exact same numerical
+        result as the original interpolating get_position() at bucket
+        boundaries, with negligible error in between.
+        """
+        if not self._normalized_points:
+            self._lut = None
+            return
+        n = config.TRACK_LUT_BUCKETS
+        lut = []
+        for i in range(n):
+            pct = i / n
+            lut.append(self._interpolate_position(pct))
+        self._lut = lut
 
     def get_track_outline(self):
         """Get normalized track outline as list of (x, y) tuples."""
         return [(x, y) for _, x, y in self._normalized_points]
 
     def get_position(self, lap_dist_pct):
-        """Interpolate a car's position from its LapDistPct."""
+        """Interpolate a car's position from its LapDistPct.
+
+        Fast path: pre-computed LUT (O(1)). Falls back to interpolation
+        if the LUT was not built (e.g. legacy code paths).
+        """
         if not self.mapping_complete or not self._normalized_points:
+            return None
+        if lap_dist_pct is None:
             return None
 
         pct = lap_dist_pct % 1.0
+
+        if self._lut is not None:
+            n = len(self._lut)
+            idx = int(pct * n)
+            if idx >= n:
+                idx = n - 1
+            return self._lut[idx]
+
+        return self._interpolate_position(pct)
+
+    def _interpolate_position(self, pct):
+        """Original O(log N) interpolation. Used to seed the LUT."""
         points = self._normalized_points
+        if not points:
+            return None
 
         # Handle pct outside recorded range (wraparound)
         if pct <= points[0][0] or pct >= points[-1][0]:
@@ -190,6 +240,7 @@ class TrackMapper:
         self._normalized_points = points
         self.mapping_complete = True
         self._track_key = track_key
+        self._build_lut()
         return True
 
     def save_to_db(self, track_key):
